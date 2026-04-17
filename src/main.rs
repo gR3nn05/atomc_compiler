@@ -1,14 +1,16 @@
 pub mod token;
 pub mod lexer;
+pub mod parser;
 
 use std::env;
 use std::fs;
 use std::path::Path;
 use lexer::Lexer;
+use parser::Parser;
 use token::TokenCode;
 
 fn print_help(){
-    println!("AtomC Compiler - DevOps Edition");
+    println!("AtomC Compiler");
     println!("Usage:");
     println!("  atomc -h                Show this help message");
     println!("  atomc -test             Run the lexer against all .c files in the tests/ directory");
@@ -27,18 +29,32 @@ fn compile_file(filepath: &str){
     };
 
     let mut lexer = Lexer::new(&source);
+    let mut tokens = Vec::new();
     
+    //LEXICAL ANALYSIS
     loop{
         let token =  lexer.get_next_token();
-        println!("Line {:03}: {:?}", token.line, token.code);
 
-        if token.code == TokenCode::END{
+        //commented out to not flood the terminal
+        //println!("Line {:03}: {:?}", token.line, token.code);
+
+        let is_end = token.code == TokenCode::END;
+        tokens.push(token);
+
+        if is_end{
             break;
         }
     }
 
-    println!("--Finished Lexing {}--", filepath);
+    println!("Finished Lexing {}", filepath);
 
+    //SYNTACTIC ANALYSIS
+    println!("Starting Syntax Analysis for {}", filepath);
+    let mut parser = Parser::new(tokens);
+    parser.parse(); // run the parser
+    
+    // if parser.parse() finishes without calling self.err(), the syntax is correct
+    println!("Syntax Analysis Successful for {}\n", filepath);
 }
 
 fn run_tests(){
