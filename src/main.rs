@@ -1,6 +1,8 @@
 pub mod token;
 pub mod lexer;
 pub mod parser;
+pub mod symbol;
+pub mod symtable;
 
 use std::env;
 use std::fs;

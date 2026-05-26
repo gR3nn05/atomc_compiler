@@ -1,13 +1,19 @@
 use crate::token::{Token, TokenCode};
+use crate::symtable::SymTable; 
+use crate::symbol::{Type, TypeBase, Symbol, SymbolKind, MemClass}; 
 
 pub struct Parser{
     tokens: Vec<Token>,
     pos: usize,
+    sym_table: SymTable,
 }
 
 impl Parser{
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self{tokens, pos: 0 }
+        Self{tokens, 
+            pos: 0,
+            sym_table: SymTable::new(),
+        }
     }
 
     //get current token
@@ -40,6 +46,17 @@ impl Parser{
             return true;
         }
         false
+    }
+
+    // Extracts the actual string from an ID token
+    fn consume_id_name(&mut self) -> Option<String> {
+        if let Some(Token { code: TokenCode::ID(name), .. }) = self.crt_tk() {
+            let id_name = name.clone();
+            self.pos += 1;
+            Some(id_name)
+        } else {
+            None
+        }
     }
 
     fn consume_ct_int(&mut self) -> bool {
@@ -90,112 +107,186 @@ impl Parser{
         }
     }
 
-    //struct_def: STRUCT ID LACC var_def* RACC SEMICOLON
-
-    fn struct_def(&mut self) -> bool{
+    // struct_def: STRUCT ID LACC var_def* RACC SEMICOLON
+    fn struct_def(&mut self) -> bool {
         let start_pos = self.pos;
-        if self.consume(TokenCode::STRUCT){
-            if self.consume_id(){
-                if self.consume(TokenCode::LACC){
-                    while self.var_def(){} //var_def*
-                    if self.consume(TokenCode::RACC){
-                        if self.consume(TokenCode::SEMICOLON){
-                            return true;
-                        }
-                        else {self.err("Expected ';' after struct definition"); }
+        if self.consume(TokenCode::STRUCT) {
+            
+            //Use consume_id_name to get the struct's name
+            if let Some(struct_name) = self.consume_id_name() {
+                if self.consume(TokenCode::LACC) {
+                    
+                    //Add Struct to Symbol Table & Open Scope
+                    let mut struct_sym = Symbol::new(struct_name.clone(), SymbolKind::Struct, self.sym_table.current_depth);
+                    struct_sym.type_info.tb = TypeBase::Struct;
+                    
+                    if let Err(e) = self.sym_table.add_symbol(struct_sym) {
+                        self.err(&e);
                     }
-                    else {self.err("Expected '}' in struct definition"); }
+
+                    self.sym_table.push_domain(); // Open scope for struct members
+
+                    while self.var_def() {} // Parse all internal variables (x, y)
+
+                    if self.consume(TokenCode::RACC) {
+                        
+                        // Close Struct Scope 
+                        self.sym_table.drop_domain();
+
+                        if self.consume(TokenCode::SEMICOLON) {
+                            return true;
+                        } else { self.err("Missing ';' after struct definition"); }
+                    } else { self.err("Missing '}' in struct definition"); }
                 }
-            }
-            else {self.err("Missing ID after 'struct'"); }
+            } else { self.err("Missing ID after 'struct'"); }
         }
         self.pos = start_pos;
         false
     }
 
-    //var_def: type_base ID array_decl? (COMMA ID array_decl?)* SEMICOLON
-
-    fn var_def(&mut self) -> bool{
+    // var_def: type_base ID array_decl? (COMMA ID array_decl?)* SEMICOLON
+    fn var_def(&mut self) -> bool {
         let start_pos = self.pos;
-        if self.type_base(){
-            if self.consume_id(){
-                self.array_decl(); //array_decl?
-                while self.consume(TokenCode::COMMA){
-                    if self.consume_id(){
-                        self.array_decl();
-                    }else {
+        
+        if let Some(base_type) = self.type_base() {
+            if let Some(var_name) = self.consume_id_name() {
+                
+                let mut current_type = base_type.clone();
+                self.array_decl(&mut current_type); // Modifies current_type if it's an array
+                
+                //Add the first variable to the Symbol Table
+                let mut sym = Symbol::new(var_name, SymbolKind::Var, self.sym_table.current_depth);
+                sym.type_info = current_type;
+                if let Err(e) = self.sym_table.add_symbol(sym) {
+                    self.err(&e);
+                }
+                
+                // Loop to handle comma-separated variables
+                while self.consume(TokenCode::COMMA) {
+                    if let Some(next_var_name) = self.consume_id_name() {
+                        
+                        let mut next_type = base_type.clone();
+                        self.array_decl(&mut next_type);
+                        
+                        //Add the next variable 
+                        let mut next_sym = Symbol::new(next_var_name, SymbolKind::Var, self.sym_table.current_depth);
+                        next_sym.type_info = next_type;
+                        if let Err(e) = self.sym_table.add_symbol(next_sym) {
+                            self.err(&e);
+                        }
+                    } else {
                         self.err("Missing variable name after ','");
                     }
                 }
-                if self.consume(TokenCode::SEMICOLON){
+
+                if self.consume(TokenCode::SEMICOLON) {
                     return true;
+                } else {
+                    self.err("Missing ';' at the end of variable declaration");
                 }
-                else {self.err("Expected ';' after var definition"); }
             }
         }
+        
         self.pos = start_pos;
         false
     }
 
-    //type_base: INT | DOUBLE | CHAR | STRUCT ID
-
-    fn type_base(&mut self) -> bool{
-        let start_pos = self.pos; //save initial pos
-
-        if self.consume(TokenCode::INT) {return true;}
-        if self.consume(TokenCode::DOUBLE) {return true;}
-        if self.consume(TokenCode::CHAR) {return true;}
-        if self.consume(TokenCode::STRUCT) {
-            if self.consume_id(){
-                return true;
-            }
-            self.err("Missing ID after 'struct'");
-        }
-
-        self.pos = start_pos; //restore pos if no match
-        false
-    }
-
-    //array_decl: LBRACKET expr? RBRACKET
-
-    fn array_decl(&mut self) -> bool{
+   // type_base [out Type *t]: INT | DOUBLE | CHAR | STRUCT ID
+    fn type_base(&mut self) -> Option<Type> {
         let start_pos = self.pos;
-        if self.consume(TokenCode::LBRACKET){
-            self.expr(); //changed to satisfy test 9
-            if self.consume(TokenCode::RBRACKET){
-                return true
+        let mut t = Type::new();
+
+        if self.consume(TokenCode::INT) {
+            t.tb = TypeBase::Int;
+            return Some(t);
+        }
+        if self.consume(TokenCode::DOUBLE) {
+            t.tb = TypeBase::Double;
+            return Some(t);
+        }
+        if self.consume(TokenCode::CHAR) {
+            t.tb = TypeBase ::Char;
+            return Some(t);
+        }
+        if self.consume(TokenCode::STRUCT) {
+            if let Some(name) = self.consume_id_name() {
+                
+                //Check if struct exists
+                if self.sym_table.find_symbol(&name).is_none() {
+                    self.err(&format!("Undefined struct: {}", name));
+                }
+                t.tb = TypeBase::Struct;
+                t.struct_name = Some(name);
+                return Some(t);
+            } else {
+                self.err("Missing ID after 'struct'");
             }
-            self.err("Missing ']' after '['");
+        }
+
+        self.pos = start_pos;
+        None
+    }
+    
+    // array_decl [inout Type *t]: LBRACKET expr? RBRACKET
+    fn array_decl(&mut self, t: &mut Type) -> bool {
+        let start_pos = self.pos;
+        if self.consume(TokenCode::LBRACKET) {
+            
+            self.expr(); // We consume the math inside the brackets
+            t.elements = 0; // Mark this type as an array
+
+            if self.consume(TokenCode::RBRACKET) {
+                return true;
+            } else { self.err("Missing ']' in array declaration"); }
         }
         self.pos = start_pos;
         false
     }
 
-    // fn_def: (type_base | VOID) ID
-    //               LPAR (fn_param (COMMA fn_param)*)? RPAR
-    //               stm_compound 
-
-    fn fn_def(&mut self) -> bool{
+    // fnDef: (type_base | VOID) ID LPAR (fnParam (COMMA fnParam)*)? RPAR stm_compound
+    fn fn_def(&mut self) -> bool {
         let start_pos = self.pos;
         let mut has_type = false;
-
-        if self.type_base() || self.consume(TokenCode::VOID){
+        let mut return_type = Type::new();
+        
+        if let Some(base_type) = self.type_base() {
             has_type = true;
+            return_type = base_type;
+        } else if self.consume(TokenCode::VOID) {
+            has_type = true;
+            return_type.tb = TypeBase::Void;
         }
 
-        if has_type{
-            if self.consume_id(){
-                if self.consume(TokenCode::LPAR){
-                    if self.fn_param(){
-                        while self.consume(TokenCode::COMMA){
-                            if !self.fn_param() {self.err("Expected function parameters after ','"); }
+        if has_type {
+            if let Some(fn_name) = self.consume_id_name() {
+                if self.consume(TokenCode::LPAR) {
+                    
+                    //Add function to global scope & open param scope
+                    let mut fn_sym = Symbol::new(fn_name.clone(), SymbolKind::Fn, self.sym_table.current_depth);
+                    fn_sym.type_info = return_type;
+                    if let Err(e) = self.sym_table.add_symbol(fn_sym) {
+                        self.err(&e);
+                    }
+                    
+                    self.sym_table.push_domain(); // Open scope for arguments
+                    
+
+                    if self.fn_param() {
+                        while self.consume(TokenCode::COMMA) {
+                            if !self.fn_param() { self.err("Expected function parameter after ','"); }
                         }
                     }
-                    if self.consume(TokenCode::RPAR){
-                        if self.stm_compound(){
+                    if self.consume(TokenCode::RPAR) {
+                        
+                        // Pass 'false' because the domain was already pushed for the arguments!
+                        if self.stm_compound(false) { 
+                            
+                            //Close param/local scope
+                            self.sym_table.drop_domain();
+                            
                             return true;
-                        } else {self.err("Expexted compond statement '{...}' from function body"); }
-                    } else {self.err("Missing ')' in function definition"); }
+                        } else { self.err("Expected compound statement '{...}' for function body"); }
+                    } else { self.err("Missing ')' in function definition"); }
                 }
             }
         }
@@ -203,13 +294,22 @@ impl Parser{
         false
     }
 
-    //fn_param: type_base ID array_decl?
-
+    // fnParam: type_base ID array_decl?
     fn fn_param(&mut self) -> bool {
         let start_pos = self.pos;
-        if self.type_base() {
-            if self.consume_id() {
-                self.array_decl(); // optional
+        if let Some(base_type) = self.type_base() {
+            if let Some(var_name) = self.consume_id_name() {
+                
+                let mut current_type = base_type.clone();
+                self.array_decl(&mut current_type); // optional array modification
+                
+                //Add parameter to the current scope
+                let mut sym = Symbol::new(var_name, SymbolKind::Param, self.sym_table.current_depth);
+                sym.type_info = current_type;
+                if let Err(e) = self.sym_table.add_symbol(sym) {
+                    self.err(&e);
+                }
+                
                 return true;
             } else { self.err("Missing ID in function parameter"); }
         }
@@ -229,7 +329,7 @@ impl Parser{
         let start_pos = self.pos;
         
         //stm_compound
-        if self.stm_compound() {return true; }
+        if self.stm_compound(true) {return true; }
 
         // IF LPAR expr RPAR stm (ELSE stm)?
         if self.consume(TokenCode::IF) {
@@ -290,27 +390,34 @@ impl Parser{
         false
     }
 
-    //stm_compound: LACC (var_def | stm)* RACC
-
-    fn stm_compound(&mut self) -> bool{
+    // stm_compound [in bool newDomain]: LACC (var_def | stm)* RACC
+    fn stm_compound(&mut self, new_domain: bool) -> bool {
         let start_pos = self.pos;
-        if self.consume(TokenCode::LACC){
-            loop{
-                // loop as long as we match either a var_def OR a stm
+        if self.consume(TokenCode::LACC) {
+            
+            // Open scope 
+            if new_domain {
+                self.sym_table.push_domain();
+            }
+
+            loop {
                 if self.var_def() { continue; }
                 if self.stm() { continue; }
                 break;
             }
-
-            if self.consume(TokenCode::RACC){
+            if self.consume(TokenCode::RACC) {
+                
+                // Close scope
+                if new_domain {
+                    self.sym_table.drop_domain();
+                }
+                
                 return true;
-            }
-            self.err("Missing '}' at the end of compound statement");
+            } else { self.err("Missing '}' to close compound statement"); }
         }
         self.pos = start_pos;
         false
     }
-
     //Expressions
 
     //expr: expr_assign
@@ -319,12 +426,12 @@ impl Parser{
         self.expr_assign()
     }
 
-    //expr_assign: expr_unary ASSIGN expr_assign | expr_or
+    //expr_assign: _u ASSIGN expr_assign | expr_or
 
     fn expr_assign(&mut self) -> bool{
         let start_pos = self.pos;
 
-        if self.expr_unary() {
+        if self._u() {
             if self.consume(TokenCode::ASSIGN){
                 if self.expr_assign(){
                     return true;
@@ -469,32 +576,34 @@ impl Parser{
     }
 
     // expr_cast: LPAR type_base array_decl? RPAR expr_cast | expr_unary
-
     fn expr_cast(&mut self) -> bool {
         let start_pos = self.pos;
         if self.consume(TokenCode::LPAR) {
-            if self.type_base() {
-                self.array_decl(); // optional
+            
+            // Capture the type and pass it to array_decl 
+            if let Some(mut base_type) = self.type_base() {
+                self.array_decl(&mut base_type); // optional
                 if self.consume(TokenCode::RPAR) {
                     if self.expr_cast() {
                         return true;
                     }
                 }
-            }
+            }else { self.err("Invalid type in cast expression"); }
+            
         }
         self.pos = start_pos;
 
-        if self.expr_unary() { return true; }
+        if self._u() { return true; }
         
         false
     }
 
-    // expr_unary: (SUB | NOT) expr_unary | expr_postfix
+    // _u: (SUB | NOT) _u | expr_postfix
 
-    fn expr_unary(&mut self) -> bool {
+    fn _u(&mut self) -> bool {
         let start_pos = self.pos;
         if self.consume(TokenCode::SUB) || self.consume(TokenCode::NOT) {
-            if self.expr_unary() {
+            if self._u() {
                 return true;
             }
             self.err("Missing expression after '-' or '!'");
